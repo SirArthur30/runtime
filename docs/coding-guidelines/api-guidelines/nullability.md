@@ -38,6 +38,7 @@ The majority of reference type usage in our APIs is fairly clear as to whether i
 - **DO** prefer nullable over non-nullable if there's any disagreement between the previous guidelines.  For example, if a non-virtual method has documentation that suggests `null` isn't accepted but the implementation explicitly checks for, normalizes, and accepts a `null` input, the parameter should be defined nullable.
 
 However, there are some gray areas that require case-by-case analysis to determine intent. In particular, if a parameter isn't validated nor sanitized nor documented regarding `null`, but in some cases simply ignored such that a `null` doesn't currently cause any problems, several factors should be considered when determining whether to annotate it as `null`.
+
 - Is `null` ever passed in our own code bases?  If yes, it likely should be nullable.
 - Is `null` ever passed in prominent 3rd-party code bases?  If yes, it likely should be nullable.
 - Is `null` likely to be interpreted as a default / nop placeholder by callers?  If yes, it likely should be nullable.
@@ -60,12 +61,14 @@ Annotating one of our return types as non-nullable is equivalent to documenting 
 For virtual members, annotating a return type as non-nullable places a requirement on all overrides to meet those same guarantees, just as any other documented behaviors of a virtuals apply to all overrides, whether those stated guarantees can be enforced by the compiler or not.  An override that doesn't abide by these guarantees has a bug.  For existing virtual APIs that have already documented a guarantee about a non-nullable return, it's expected that the return type will be annotated as non-nullable, and derived types must continue to respect that guarantee, albeit now with the compiler's assistance.
 
 However, for existing virtual APIs that do not have any such strong guarantee documented but where the intent was for the return value to be non-`null`, it is a grayer area.  The most accurate return type would be `T?`, whereas the intent-based return type would be `T`.  For `T?`, the pros are that it accurately reflects that `null`s may emerge, but at the expense of consumers that know a `null` will never emerge having to use `!` or some other suppression when dereferencing. For `T`, the pros are that it accurately conveys the intent to overriders and allows consumers to avoid needing any form of suppression, but ironically at the expense of potential increases in occurrences of `NullReferenceException`s due to consumers then not validating the return type to be non-`null` and not being able to trust in the meaning of a method returning non-nullable. As such, there are several factors to consider when deciding which return type to use for an existing virtual/abstract/interface method:
+
 1. How common is it that an existing override written before the guarantee was put in effect would return `null`?
 2. How widespread are overrides of the method in question?  This contributes to (1).
 3. How common is it to invoke the method via the base vs via a derived type that may narrow the return type to `T` from `T?`?
 4. How common is it in the case of (3) for such invocations to then dereference the result rather than passing it off to something else that accepts a `T?`?
 
 `Object.ToString` is arguably the most extreme case.  Answering the above questions:
+
 1. It is fairly easy in any reasonably-sized code base to find cases, intentional or otherwise, where `ToString` returns `null` in some cases (we've found examples in dotnet/corefx, dotnet/roslyn, NuGet/NuGet.Client, aspnet/AspNetCore, and so on).  One of the most prevalent conditions for this are types that just return the value in a string field which may contain its default value of `null`, and in particular for structs where a ctor may not have even had a chance to run and validate an input.  Guidance in the docs suggests that `ToString` shouldn't return `null` or `string.Empty`, but even the docs don't follow its own guidance.
 2. Thousands upon thousands of types we don't control override this method today.
 3. It's common for helper routines to invoke via the base `object.ToString`, but many `ToString` uses are actually on derived types.  This is particularly true when working in a code base that both defines a type and consumes its `ToString`.
@@ -79,6 +82,7 @@ In contrast, we've annotated `Exception.Message` (which is also virtual) as bein
 
 - **DO** implement `IComparable<T?>` instead of `IComparable<T>` on a type `T` that is a reference type.
 - **DO** make an `IEquatable<T>` implementation oblivious when implemented on a type `T` that is a reference type.  `IEquatable<T>` is invariant by design.  However, the lack of covariance means that `T?` couldn't be used in places constrained to `T : IEquatable<T>`.  Until a better solution is available, we make such implementations oblivious so they can be used in all places, e.g.
+
 ```C#
 public sealed class Version : ICloneable, IComparable, IComparable<Version?>,
 #nullable disable // see comment on String
@@ -91,11 +95,14 @@ public sealed class Version : ICloneable, IComparable, IComparable<Version?>,
 Some special rules need to apply to generic constraints:
 
 - **DO** make a generic constraint oblivious when constraining `T : IEquatable<T>`.  As with the above interfaces discussion, this is to work around a limitation, where we want the `T` to be usable with both `T` and `T?` (but `IEquatable<T>` is invariant).  For example, instead of defining a method like:
+
 ```C#
 public static bool Contains<T>(this System.Span<T> span, T value)
     where T : IEquatable<T>
 ```
+
 it should be defined as:
+
 ```C#
 public static bool Contains<T>(this System.Span<T> span, T value)
 #nullable disable
@@ -122,12 +129,12 @@ A code review for enabling nullability generally involves three passes:
 
 - **Review all implementation changes made in the code.**  Except when explicitly fixing a bug (which should be rare), the annotations employed for nullability should have zero impact on the generated IL (other than potentially some added attributes in the metadata).  The most common changes are:
 
-    - Adding `?` to reference type parameters and local symbols.  These inform the compiler that nulls are allowed.  For locals, they evaporate entirely at compile time.  For parameters, they impact the [Nullable(...)] attributes emitted into the metadata by the compiler, but have no effect on the implementation IL.
+- Adding `?` to reference type parameters and local symbols.  These inform the compiler that nulls are allowed.  For locals, they evaporate entirely at compile time.  For parameters, they impact the [Nullable(...)] attributes emitted into the metadata by the compiler, but have no effect on the implementation IL.
 
-    - Adding `!` to reference type usage.  These essentially suppress the null warning, telling the compiler to treat the expression as if it's non-null.  These evaporate at compile-time.
+- Adding `!` to reference type usage.  These essentially suppress the null warning, telling the compiler to treat the expression as if it's non-null.  These evaporate at compile-time.
 
-    - Adding `Debug.Assert(reference != null);` statements.  These inform the compiler that the mentioned reference is non-`null`, which will cause the compiler to factor that in and have the effect of suppressing subsequent warnings on that reference (until the flow analysis suggests that could change).  As with any `Debug.Assert`, these evaporate at compile-time in release builds (where `DEBUG` isn't defined).
-  
+- Adding `Debug.Assert(reference != null);` statements.  These inform the compiler that the mentioned reference is non-`null`, which will cause the compiler to factor that in and have the effect of suppressing subsequent warnings on that reference (until the flow analysis suggests that could change).  As with any `Debug.Assert`, these evaporate at compile-time in release builds (where `DEBUG` isn't defined).
+
   - Most any other changes have the potential to change the IL, which should not be necessary for the feature.  In particular, it's common for `?`s on dereferences to sneak in, e.g. changing `someVar.SomeMethod()` to `someVar?.SomeMethod()`; that is a change to the IL, and should only be employed when there's an actual known bug that's important to fix, as otherwise we're incurring unnecessary cost.  Similarly, it's easy to accidentally add `?` to value types, which has a significant impact, changing the `T` to a `Nullable<T>` and should be avoided.
 
   - Any `!`s added that should have been unnecessary and are required due to either a compiler issue or due to lack of expressibility about annotations should have a `// TODO-NULLABLE: http://link/to/relevant/issue` comment added on the same line.
